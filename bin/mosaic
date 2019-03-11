@@ -1,7 +1,8 @@
 #!/bin/bash
 set -eu
 
-while getopts "hp:v:" opt; do
+command=build
+while getopts "hp:v:c" opt; do
   case ${opt} in
   (h)
     echo "mosaic - Build Pretty Tiles for Pivotal Operations Manager"
@@ -13,6 +14,7 @@ while getopts "hp:v:" opt; do
     echo "  -h    Show this screen."
     echo "  -p    Internal Tile Name."
     echo "  -v    Tile version (x.y.z)"
+    echo "  -c    Check the pre-tile configuration"
     echo
     exit 0
     ;;
@@ -23,6 +25,10 @@ while getopts "hp:v:" opt; do
 
   (v)
     export TILE_VERSION=$OPTARG
+    ;;
+
+  (c)
+    command=check
     ;;
 
   (*)
@@ -46,40 +52,83 @@ if [[ $rc != 0 ]]; then
   exit $rc
 fi
 
-rm -rf .build/
-mkdir -p .build/{metadata,releases}
-mkdir -p migrations
-cp -av migrations .build/ # opsmgr v1.7+
+case $command in
+(check)
+  echo "Referenced Properties:"
+  DEBUG= spruce json tile/form_types.yml | jq -r '.form_types[].property_inputs[].reference' | sed -e 's/^/  /';
+  echo
 
-echo "Building $PRODUCT_NAME / $TILE_VERSION"
-if [[ -f logo.png ]]; then
-  echo ">> base64-encoding logo image (logo.png)..."
-  base64 -w0 logo.png > logo.b64
-else
-  echo "!! no logo image (logo.png) found"
-fi
+  echo "Defined Properties:"
+  DEBUG= spruce json tile/property_blueprints.yml | jq -r '.property_blueprints[].name' | sed -e 's/^/  /';
+  echo
 
-echo ">> merging constituent YAML files into product manifest..."
-for yml in tile/*.yml; do
-  echo "   - including $yml..."
-done
-spruce merge --prune meta tile/*.yml \
-  > .build/metadata/$PRODUCT_NAME.yml
+  echo "Problems:"
+  problems=0
+  for prop in $(DEBUG= spruce json tile/form_types.yml | jq -r '.form_types[].property_inputs[].reference' | uniq); do
+    if [[ ${prop##.properties.} = $prop ]]; then
+      echo " !! $prop: malformed top-level property reference"
+      problems=$(( problems + 1 ))
+    else
+      prop=${prop##.properties.}
+      found=$(DEBUG= spruce json tile/property_blueprints.yml | jq -r '.property_blueprints[] | select(.name == $prop) | .name' --arg prop $prop)
+      if [[ -z $found ]]; then
+         echo " !! $prop: not defined!"
+         problems=$(( problems + 1 ))
+      fi
+    fi
+  done
+  echo
+  echo "$problems problem(s) found."
+  if [[ $problems == 0 ]]; then
+    exit 0
+  else
+    exit 1
+  fi
+  ;;
 
-echo ">> copying BOSH releases into place..."
-spruce json .build/metadata/$PRODUCT_NAME.yml | \
-  jq -r '.releases[].file' | \
-  xargs -t -I@ cp releases/@ \
-                  .build/releases/@
-echo
+(build)
+  rm -rf .build/
+  mkdir -p .build/{metadata,releases}
+  mkdir -p migrations
+  cp -av migrations .build/ # opsmgr v1.7+
 
-echo "Generating $PRODUCT_NAME-$TILE_VERSION.pivotal ..."
-pushd .build
-zip -r $PRODUCT_NAME-$TILE_VERSION.pivotal \
-       migrations/ \
-       metadata/ \
-       releases
+  echo "Building $PRODUCT_NAME / $TILE_VERSION"
+  if [[ -f logo.png ]]; then
+    echo ">> base64-encoding logo image (logo.png)..."
+    base64 -w0 logo.png > logo.b64
+  else
+    echo "!! no logo image (logo.png) found"
+  fi
 
-mv $PRODUCT_NAME-$TILE_VERSION.pivotal ../
-popd
-rm -rf .build
+  echo ">> merging constituent YAML files into product manifest..."
+  for yml in tile/*.yml; do
+    echo "   - including $yml..."
+  done
+  spruce merge --prune meta tile/*.yml \
+    > .build/metadata/$PRODUCT_NAME.yml
+
+  if [[ -n ${DEBUG:-} ]]; then
+    echo "metadata/$PRODUCT_NAME.yml"
+    cat .build/metadata/$PRODUCT_NAME.yml
+    echo
+  fi
+
+  echo ">> copying BOSH releases into place..."
+  DEBUG= spruce json .build/metadata/$PRODUCT_NAME.yml | \
+    jq -r '.releases[].file' | \
+    xargs -t -I@ cp releases/@ \
+                    .build/releases/@
+  echo
+
+  echo "Generating $PRODUCT_NAME-$TILE_VERSION.pivotal ..."
+  pushd .build
+  zip -r $PRODUCT_NAME-$TILE_VERSION.pivotal \
+         migrations/ \
+         metadata/ \
+         releases
+
+  mv $PRODUCT_NAME-$TILE_VERSION.pivotal ../
+  popd
+  rm -rf .build
+  ;;
+esac
