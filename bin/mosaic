@@ -1,0 +1,85 @@
+#!/bin/bash
+set -eu
+
+while getopts "hp:v:" opt; do
+  case ${opt} in
+  (h)
+    echo "mosaic - Build Pretty Tiles for Pivotal Operations Manager"
+    echo
+    echo "USAGE: mosaic -p PRODUCT -v VERSION"
+    echo
+    echo "OPTIONS"
+    echo
+    echo "  -h    Show this screen."
+    echo "  -p    Internal Tile Name."
+    echo "  -v    Tile version (x.y.z)"
+    echo
+    exit 0
+    ;;
+
+  (p)
+    export PRODUCT_NAME=$OPTARG
+    ;;
+
+  (v)
+    export TILE_VERSION=$OPTARG
+    ;;
+
+  (*)
+    echo >&2 "Invalid argument: $1"
+    ;;
+  esac
+done
+
+# check for things we need
+rc=0
+if [[ ! -d tile/ ]]; then
+  echo >&2 "!! missing tile/ directory"
+  echo >&2 "   (this is where your component YAML files should go;"
+  echo >&2 "    mosaic will spruce merge those back together)"
+  echo >&2
+  rc=1
+fi
+if [[ $rc != 0 ]]; then
+  echo >&2
+  echo >&2 "Errors were encountered."
+  exit $rc
+fi
+
+rm -rf .build/
+mkdir -p .build/{metadata,releases}
+mkdir -p migrations
+cp -av migrations .build/ # opsmgr v1.7+
+
+echo "Building $PRODUCT_NAME / $TILE_VERSION"
+if [[ -f logo.png ]]; then
+  echo ">> base64-encoding logo image (logo.png)..."
+  base64 -w0 logo.png > logo.b64
+else
+  echo "!! no logo image (logo.png) found"
+fi
+
+echo ">> merging constituent YAML files into product manifest..."
+for yml in tile/*.yml; do
+  echo "   - including $yml..."
+done
+spruce merge --prune meta tile/*.yml \
+  > .build/metadata/$PRODUCT_NAME.yml
+
+echo ">> copying BOSH releases into place..."
+spruce json .build/metadata/$PRODUCT_NAME.yml | \
+  jq -r '.releases[].file' | \
+  xargs -t -I@ cp releases/@ \
+                  .build/releases/@
+echo
+
+echo "Generating $PRODUCT_NAME-$TILE_VERSION.pivotal ..."
+pushd .build
+zip -r $PRODUCT_NAME-$TILE_VERSION.pivotal \
+       migrations/ \
+       metadata/ \
+       releases
+
+mv $PRODUCT_NAME-$TILE_VERSION.pivotal ../
+popd
+rm -rf .build
